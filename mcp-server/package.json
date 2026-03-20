@@ -1,0 +1,27 @@
+{
+  "name": "openemr-appointments-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for managing OpenEMR patient appointments",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "openemr-appointments-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
