@@ -3,7 +3,7 @@
  * OpenEMR Health MCP Server
  *
  * Implements the canonical Health MCP Tools Specification.
- * All 22 tools use the canonical naming convention (health_*) and conform
+ * All 24 tools use the canonical naming convention (health_*) and conform
  * to the parameter and response contracts defined in the spec.
  *
  * Required environment variables:
@@ -22,9 +22,11 @@
  *   PREFERENCES_BACKEND_URL   HTTP backend for patient preferences
  *   WAITLIST_BACKEND_URL      HTTP backend for waitlist operations
  */
+import http from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { checkSlotsSchema, bookSlotSchema, listAppointmentsSchema, cancelAppointmentSchema, rescheduleAppointmentSchema, checkSlots, bookSlot, listAppointments, cancelAppointment, rescheduleAppointment, } from './tools/appointments.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { checkSlotsSchema, holdSlotSchema, confirmBookingSchema, bookSlotSchema, listAppointmentsSchema, cancelAppointmentSchema, rescheduleAppointmentSchema, checkSlots, holdSlot, confirmBooking, bookSlot, listAppointments, cancelAppointment, rescheduleAppointment, } from './tools/appointments.js';
 import { lookupPatientSchema, updatePatientInfoSchema, newPatientIntakeSchema, collectMedicalHistorySchema, lookupPatient, updatePatientInfo, newPatientIntake, collectMedicalHistory, } from './tools/patients.js';
 import { getOfficeHoursSchema, getLocationSchema, getBillingPolicySchema, getProcedureCatalogSchema, getOfficeHours, getLocation, getBillingPolicy, getProcedureCatalog, } from './tools/clinic-info.js';
 import { verifyInsuranceSchema, verifyInsurance, } from './tools/insurance.js';
@@ -44,6 +46,8 @@ const server = new McpServer({
     version: '1.0.0',
 });
 // ── §4.1 Appointment operations ───────────────────────────────────────────────
+server.tool('health_hold_slot', '[provider_kind:appointments risk_level:low requires_verification:false] Reserve a slot for a short TTL (default 5 min) without committing to OpenEMR. Returns a hold_id. Use health_confirm_booking to commit.', holdSlotSchema.shape, { readOnlyHint: false, destructiveHint: false, idempotentHint: false }, (params) => withCanonical('health_hold_slot', (t) => holdSlot(params, t), { patient_id: params.patient_id }));
+server.tool('health_confirm_booking', '[provider_kind:appointments risk_level:medium requires_verification:true] Commit a hold (from health_hold_slot) into a confirmed OpenEMR appointment. Requires idempotency_key and verification_level >= basic.', confirmBookingSchema.shape, { readOnlyHint: false, destructiveHint: false, idempotentHint: true }, (params) => withCanonical('health_confirm_booking', (t) => confirmBooking(params, t), { idempotency_key: params.idempotency_key }));
 server.tool('health_check_slots', '[provider_kind:appointments risk_level:low requires_verification:false] Check available appointment slots in OpenEMR. Supports natural language dates (today, tomorrow, next monday).', checkSlotsSchema.shape, { readOnlyHint: true, idempotentHint: true }, (params) => withCanonical('health_check_slots', (t) => checkSlots(params, t)));
 server.tool('health_book_slot', '[provider_kind:appointments risk_level:medium requires_verification:false] Book an available appointment slot for a patient. Requires a slot_id from health_check_slots and patient identification.', bookSlotSchema.shape, { readOnlyHint: false, destructiveHint: false, idempotentHint: false }, (params) => withCanonical('health_book_slot', (t) => bookSlot(params, t)));
 server.tool('health_list_appointments', '[provider_kind:appointments risk_level:low requires_verification:false] List appointments for a patient. Returns masked results unless patient_verified is true.', listAppointmentsSchema.shape, { readOnlyHint: true, idempotentHint: true }, (params) => withCanonical('health_list_appointments', (t) => listAppointments(params, t)));
@@ -70,10 +74,58 @@ server.tool('health_waitlist_remove', '[provider_kind:appointments risk_level:lo
 server.tool('health_waitlist_offer', '[provider_kind:appointments risk_level:medium requires_verification:false] Send a waitlist slot offer to a patient. Requires WAITLIST_BACKEND_URL. Exactly one expiry mode required (expires_at or expires_in_seconds).', waitlistOfferSchema.shape, { readOnlyHint: false, destructiveHint: false, idempotentHint: false }, (params) => withCanonical('health_waitlist_offer', (t) => waitlistOffer(params, t)));
 server.tool('health_waitlist_confirm_offer', '[provider_kind:appointments risk_level:medium requires_verification:false] Confirm or decline a waitlist slot offer. Idempotent per idempotency_key. Requires WAITLIST_BACKEND_URL.', waitlistConfirmOfferSchema.shape, { readOnlyHint: false, destructiveHint: false, idempotentHint: true }, (params) => withCanonical('health_waitlist_confirm_offer', (t) => waitlistConfirmOffer(params, t)));
 // ── Start ─────────────────────────────────────────────────────────────────────
-async function main() {
+// ── Transport selection ───────────────────────────────────────────────────────
+// Set MCP_PORT to run as a persistent HTTP service (for Docker / production).
+// Leave unset to run in stdio mode (for Claude Code CLI / local subprocess).
+async function startHttp(port) {
+    const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // stateless — no session pinning needed
+    });
+    await server.connect(transport);
+    const httpServer = http.createServer(async (req, res) => {
+        if (req.url === '/health') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'ok', tools: 24, server: 'openemr-health-mcp' }));
+            return;
+        }
+        if (req.url === '/mcp' || req.url === '/') {
+            // Collect body for POST requests
+            const chunks = [];
+            req.on('data', (chunk) => chunks.push(chunk));
+            req.on('end', async () => {
+                let parsedBody = undefined;
+                if (chunks.length > 0) {
+                    try {
+                        parsedBody = JSON.parse(Buffer.concat(chunks).toString());
+                    }
+                    catch {
+                        // non-JSON body (GET/DELETE) — pass undefined
+                    }
+                }
+                await transport.handleRequest(req, res, parsedBody);
+            });
+            return;
+        }
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not found. Use POST /mcp for MCP protocol or GET /health for health check.');
+    });
+    httpServer.listen(port, () => {
+        console.error(`OpenEMR Health MCP server listening on http://0.0.0.0:${port}/mcp (24 tools)`);
+    });
+}
+async function startStdio() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('OpenEMR Health MCP server running — 22 canonical health_* tools available');
+    console.error('OpenEMR Health MCP server running on stdio — 24 canonical health_* tools available');
+}
+async function main() {
+    const port = process.env['MCP_PORT'] ? parseInt(process.env['MCP_PORT'], 10) : undefined;
+    if (port) {
+        await startHttp(port);
+    }
+    else {
+        await startStdio();
+    }
 }
 main().catch((err) => {
     console.error('Fatal error:', err);

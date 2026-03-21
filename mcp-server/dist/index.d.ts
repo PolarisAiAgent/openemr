@@ -3,7 +3,7 @@
  * OpenEMR Health MCP Server
  *
  * Implements the canonical Health MCP Tools Specification.
- * All 22 tools use the canonical naming convention (health_*) and conform
+ * All 24 tools use the canonical naming convention (health_*) and conform
  * to the parameter and response contracts defined in the spec.
  *
  * Required environment variables:

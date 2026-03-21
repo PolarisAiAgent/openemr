@@ -2,6 +2,15 @@
 # MYSQL_HOST and MYSQL_ROOT_PASS are required for openemr
 # MYSQL_USER, MYSQL_PASS, OE_USER, OE_PASS are optional for openemr and
 #   if not provided, then default to openemr, openemr, admin, and pass respectively.
+#
+# MCP server (openemr-mcp):
+#   Exposes the 22 canonical health_* tools over HTTP on port 3100.
+#   Required secrets are passed via environment variables (or a .env file).
+#   Set OPENEMR_CLIENT_ID/SECRET after registering an OAuth2 client in OpenEMR:
+#     curl -X POST https://<host>/oauth2/default/registration \
+#       -H 'Content-Type: application/json' \
+#       -d '{"client_name":"openemr-mcp","redirect_uris":["https://client.example.com/cb"],
+#            "scope":"openid api:oemr user/Patient.read user/Appointment.read user/Appointment.write"}'
 services:
   mysql:
     restart: always
@@ -23,6 +32,7 @@ services:
       interval: 1m
       timeout: 5s
       retries: 3
+
   openemr:
     restart: always
     image: openemr/openemr:latest
@@ -57,6 +67,66 @@ services:
       interval: 1m
       timeout: 5s
       retries: 3
+
+  openemr-mcp:
+    restart: always
+    # Build from the mcp-server directory relative to the repo root.
+    # To use a pre-built image instead, replace `build` with:
+    #   image: ghcr.io/your-org/openemr-health-mcp:latest
+    build:
+      context: ../../mcp-server
+      dockerfile: Dockerfile
+    ports:
+    - "3100:3100"
+    environment:
+      MCP_PORT: 3100
+      NODE_ENV: production
+
+      # ── OpenEMR connection ────────────────────────────────────────────────
+      # The MCP server connects to OpenEMR's internal hostname over HTTPS.
+      # Self-signed certs are common in production OpenEMR; set NODE_TLS_REJECT_UNAUTHORIZED=0
+      # only when using a private/self-signed cert within a trusted Docker network.
+      OPENEMR_BASE_URL: https://openemr
+      OPENEMR_SITE: default
+      OPENEMR_USERNAME: ${OPENEMR_MCP_USER:-admin}
+      OPENEMR_PASSWORD: ${OPENEMR_MCP_PASS:-pass}
+      OPENEMR_CLIENT_ID: ${OPENEMR_CLIENT_ID}
+      OPENEMR_CLIENT_SECRET: ${OPENEMR_CLIENT_SECRET}
+      # Uncomment only if OpenEMR uses a private/self-signed TLS cert:
+      # NODE_TLS_REJECT_UNAUTHORIZED: "0"
+
+      # ── Optional clinic config ────────────────────────────────────────────
+      # JSON arrays/objects served by health_get_office_hours and health_get_billing_policy.
+      # If not set, defaults are used (Mon–Fri 08:00–17:00, generic billing message).
+      OFFICE_HOURS_JSON: ${OFFICE_HOURS_JSON:-}
+      BILLING_POLICY_JSON: ${BILLING_POLICY_JSON:-}
+
+      # ── Optional insurance verification (Stedi) ───────────────────────────
+      STEDI_API_KEY: ${STEDI_API_KEY:-}
+      STEDI_ENDPOINT: ${STEDI_ENDPOINT:-}
+
+      # ── Optional persistence backends ─────────────────────────────────────
+      # When not set, waitlist and preferences tools return precondition_failed (412).
+      WAITLIST_BACKEND_URL: ${WAITLIST_BACKEND_URL:-}
+      PREFERENCES_BACKEND_URL: ${PREFERENCES_BACKEND_URL:-}
+
+    depends_on:
+      openemr:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:3100/health
+      start_period: 30s
+      start_interval: 5s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+    - default
+
 volumes:
   logvolume01: {}
   sitevolume: {}
