@@ -22,6 +22,7 @@ use OpenEMR\Common\Http\HttpRestRequest;
 use OpenEMR\Common\Uuid\UuidRegistry;
 use OpenEMR\RestControllers\AllergyIntoleranceRestController;
 use OpenEMR\RestControllers\AppointmentRestController;
+use OpenEMR\RestControllers\ProviderScheduleRestController;
 use OpenEMR\RestControllers\ConditionRestController;
 // TODO: Remove this import when the OpenEMR\RestControllers\Config\RestConfig is no longer needed
 use OpenEMR\RestControllers\Config\RestConfig;
@@ -403,6 +404,12 @@ return [
         RestConfig::request_authorization_check($request, "patients", "appt");
         $data = (array) (json_decode(file_get_contents("php://input")));
         $return = (new AppointmentRestController())->post($pid, $data);
+
+        return $return;
+    },
+    "GET /api/provider/:pruuid/schedule" => function ($pruuid, HttpRestRequest $request) {
+        RestConfig::request_authorization_check($request, "patients", "appt");
+        $return = (new ProviderScheduleRestController())->getSchedule($pruuid, $request->getQueryParams());
 
         return $return;
     },

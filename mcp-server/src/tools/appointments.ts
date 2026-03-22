@@ -219,10 +219,184 @@ async function createOpenEMRAppointment(pid: string, body: Record<string, unknow
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
+// ── Schedule API type ─────────────────────────────────────────────────────────
+
+type ScheduleApi = 'auto' | 'fhir' | 'rest' | 'algorithmic';
+
+function resolveScheduleApi(): ScheduleApi {
+  const raw = (process.env['OPENEMR_SCHEDULE_API'] ?? 'auto').toLowerCase().trim();
+  if (raw === 'fhir' || raw === 'rest' || raw === 'algorithmic') return raw as ScheduleApi;
+  return 'auto';
+}
+
+// ── Schedule block types ──────────────────────────────────────────────────────
+
+// Phase 1: block from GET /api/provider/:pruuid/schedule
+interface ScheduleBlock {
+  pc_eventDate?: string;
+  pc_startTime?: string;
+  pc_endTime?: string;
+  pc_duration?: string | number;
+  pc_facility?: string | number;
+  pc_allday?: string | number;
+  [key: string]: unknown;
+}
+
+// Phase 2: FHIR Slot resource from GET /fhir/Slot
+interface FhirSlotResource {
+  id?: string;
+  start?: string;   // ISO 8601 instant
+  end?: string;     // ISO 8601 instant
+  status?: string;  // free | busy | busy-unavailable | busy-tentative | entered-in-error
+  schedule?: { reference?: string };
+  [key: string]: unknown;
+}
+
+// Normalised availability window used by generateSlotsInWindow
+interface AvailabilityWindow { openMin: number; closeMin: number; facilityId: number; }
+
+// ── FHIR Schedule/Slot fetch ───────────────────────────────────────────────────
+
+/**
+ * Step 1 of FHIR path: fetch the provider's Schedule UUID from GET /fhir/Schedule?actor=...
+ * The Schedule UUID equals the provider UUID in our implementation.
+ */
+async function fetchFhirScheduleUuid(providerUuid: string): Promise<string | null> {
+  try {
+    const raw = await openemr.get<unknown>(`/fhir/Schedule?actor=Practitioner/${encodeURIComponent(providerUuid)}`);
+    const bundle = raw as { entry?: Array<{ resource?: { id?: string } }> };
+    if (bundle.entry && bundle.entry.length > 0) {
+      return bundle.entry[0].resource?.id ?? null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Step 2 of FHIR path: fetch free Slots for a Schedule on a given date.
+ * Returns availability windows derived from the slot start/end times.
+ * Returns null if the endpoint is unavailable or returns no usable data.
+ */
+async function fetchFhirFreeSlots(
+  scheduleUuid: string,
+  date: string,
+  slotDurMins: number,
+  facilityId: number,
+  providerId: number,
+  cat: CategoryRecord,
+): Promise<Record<string, unknown>[] | null> {
+  try {
+    const url = `/fhir/Slot?schedule=Schedule/${encodeURIComponent(scheduleUuid)}&start=ge${date}&start=le${date}&status=free`;
+    const raw = await openemr.get<unknown>(url);
+    const bundle = raw as { entry?: Array<{ resource?: FhirSlotResource }> };
+    if (!bundle.entry || bundle.entry.length === 0) {
+      return null;
+    }
+
+    const slots: Record<string, unknown>[] = [];
+    for (const entry of bundle.entry) {
+      const fhirSlot = entry.resource;
+      if (!fhirSlot?.start || !fhirSlot?.end) continue;
+
+      // Parse ISO instant → HH:MM in local time
+      const startHHmm = isoToLocalHHmm(fhirSlot.start);
+      const endHHmm   = isoToLocalHHmm(fhirSlot.end);
+      if (!startHHmm || !endHHmm) continue;
+
+      const slotId = encodeSlotId({
+        date,
+        startHHmm,
+        facilityId,
+        providerId,
+        catId: Number(cat.pc_catid ?? 0),
+        durationSecs: slotDurMins * 60,
+      });
+      slots.push({
+        id: slotId,
+        slot_id: slotId,
+        date,
+        start_time: startHHmm,
+        end_time: endHHmm,
+        provider: String(providerId) || null,
+        status: 'free',
+        visit_type: cat.pc_catname ?? null,
+        duration_minutes: slotDurMins,
+        location_id: String(facilityId),
+      });
+    }
+    return slots.length > 0 ? slots : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Parse an ISO 8601 instant to HH:MM in the server's local timezone. */
+function isoToLocalHHmm(iso: string): string | null {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+  } catch {
+    return null;
+  }
+}
+
+// ── Phase 1 REST fetch ────────────────────────────────────────────────────────
+
+/**
+ * Fetch real provider schedule blocks from OpenEMR's calendar (pc_pid=0 rows).
+ * Returns null if the endpoint is not available (e.g. older OpenEMR build).
+ */
+async function fetchProviderScheduleBlocks(providerId: string, date: string): Promise<ScheduleBlock[] | null> {
+  try {
+    const raw = await openemr.get<unknown>(`/api/provider/${encodeURIComponent(providerId)}/schedule?date_start=${date}&date_end=${date}`);
+    // Response shape: { data: [{ schedule_blocks: [...], ... }] }
+    const record = extractRecord<{ schedule_blocks?: unknown }>(raw);
+    if (record && Array.isArray(record.schedule_blocks)) {
+      return record.schedule_blocks as ScheduleBlock[];
+    }
+    return null;
+  } catch {
+    return null; // endpoint not available — fall back to algorithmic generation
+  }
+}
+
+/**
+ * Generate slots algorithmically within a time window, removing already-booked
+ * start times.  Used as fallback when no schedule blocks exist.
+ */
+function generateSlotsInWindow(
+  openMin: number,
+  closeMin: number,
+  slotDurMins: number,
+  bookedTimes: Set<string>,
+  date: string,
+  facilityId: number,
+  providerId: number,
+  cat: CategoryRecord,
+): Record<string, unknown>[] {
+  const slots: Record<string, unknown>[] = [];
+  for (let min = openMin; min + slotDurMins <= closeMin; min += slotDurMins) {
+    const hh = String(Math.floor(min / 60)).padStart(2, '0');
+    const mm = String(min % 60).padStart(2, '0');
+    const startTime = `${hh}:${mm}`;
+    if (bookedTimes.has(startTime)) continue;
+    const slotId = encodeSlotId({ date, startHHmm: startTime, facilityId, providerId, catId: Number(cat.pc_catid ?? 0), durationSecs: slotDurMins * 60 });
+    slots.push({ id: slotId, slot_id: slotId, date, start_time: startTime, end_time: addMinutes(startTime, slotDurMins) ?? '', provider: providerId ? String(providerId) : null, status: 'free', visit_type: cat.pc_catname ?? null, duration_minutes: slotDurMins, location_id: String(facilityId) });
+  }
+  return slots;
+}
+
 export async function checkSlots(params: z.infer<typeof checkSlotsSchema>, startMs: number): Promise<CanonicalResponse> {
   const date = resolveDate(params.date) ?? todayIso();
   const durationMins = (params.duration_minutes ?? 0) > 0 ? params.duration_minutes! : 30;
+  const scheduleApi = resolveScheduleApi();
 
+  // Fetch categories, facilities, and existing appointments in parallel
   const [catRaw, facilityRaw, existingRaw] = await Promise.all([
     openemr.get<unknown>('/api/list/appttype'),
     openemr.get<unknown>('/api/facility'),
@@ -235,12 +409,6 @@ export async function checkSlots(params: z.infer<typeof checkSlotsSchema>, start
 
   if (!defaultFacility?.id) return providerError('health_check_slots', 'No facilities configured in OpenEMR', startMs);
 
-  const bookedTimes = new Set(
-    extractList<ApptRecord>(existingRaw)
-      .filter((a) => a.pc_eventDate === date)
-      .map((a) => (a.pc_startTime ?? '').slice(0, 5)),
-  );
-
   const matchingCats = params.visit_type
     ? categories.filter((c) => (c.pc_catname ?? '').toLowerCase().includes(params.visit_type!.toLowerCase()))
     : categories.slice(0, 1);
@@ -252,18 +420,71 @@ export async function checkSlots(params: z.infer<typeof checkSlotsSchema>, start
   const catDurSecs = Number(cat.pc_duration ?? durationMins * 60);
   const slotDurMins = Math.floor(catDurSecs / 60) || durationMins;
   const providerId = params.provider_id ? parseInt(params.provider_id, 10) : 0;
-  const slots: Record<string, unknown>[] = [];
+  const facilityId = Number(defaultFacility.id);
 
-  for (let min = 8 * 60; min + slotDurMins <= 17 * 60; min += slotDurMins) {
-    const hh = String(Math.floor(min / 60)).padStart(2, '0');
-    const mm = String(min % 60).padStart(2, '0');
-    const startTime = `${hh}:${mm}`;
-    if (bookedTimes.has(startTime)) continue;
-    const slotId = encodeSlotId({ date, startHHmm: startTime, facilityId: Number(defaultFacility.id), providerId, catId: Number(cat.pc_catid ?? 0), durationSecs: slotDurMins * 60 });
-    slots.push({ id: slotId, slot_id: slotId, date, start_time: startTime, end_time: addMinutes(startTime, slotDurMins) ?? '', provider: params.provider_id ?? null, status: 'free', visit_type: cat.pc_catname ?? null, duration_minutes: slotDurMins, location_id: String(defaultFacility.id) });
+  // Per-provider booked times — only exclude appointments for this provider
+  const allAppts = extractList<ApptRecord>(existingRaw).filter((a) => a.pc_eventDate === date);
+  const providerFilterId = params.provider_id ? parseInt(params.provider_id, 10) : null;
+  const bookedTimes = new Set(
+    allAppts
+      .filter((a) => providerFilterId === null || Number(a.pc_aid ?? -1) === providerFilterId)
+      .map((a) => (a.pc_startTime ?? '').slice(0, 5)),
+  );
+
+  let slots: Record<string, unknown>[] = [];
+  let slotSource = 'algorithmic';
+
+  // ── FHIR path (Phase 2) ────────────────────────────────────────────────────
+  if (params.provider_id && (scheduleApi === 'auto' || scheduleApi === 'fhir')) {
+    // Step 1: resolve provider UUID from numeric ID (or use directly if it's a UUID)
+    const providerRef = params.provider_id;
+    const scheduleUuid = await fetchFhirScheduleUuid(providerRef);
+
+    if (scheduleUuid !== null) {
+      const fhirSlots = await fetchFhirFreeSlots(scheduleUuid, date, slotDurMins, facilityId, providerId, cat);
+      if (fhirSlots !== null) {
+        slots = fhirSlots;
+        slotSource = 'fhir';
+      } else if (scheduleApi === 'fhir') {
+        return providerError('health_check_slots', 'FHIR Slot endpoint returned no data for this provider/date', startMs);
+      }
+    } else if (scheduleApi === 'fhir') {
+      return providerError('health_check_slots', `No FHIR Schedule found for provider ${params.provider_id}`, startMs);
+    }
   }
 
-  return success('health_check_slots', { provider: 'openemr', date, available_slots: slots, count: slots.length, earliest_available_date: slots.length > 0 ? date : null }, startMs);
+  // ── Phase 1 REST path ──────────────────────────────────────────────────────
+  if (slotSource === 'algorithmic' && params.provider_id && (scheduleApi === 'auto' || scheduleApi === 'rest')) {
+    const scheduleBlocks = await fetchProviderScheduleBlocks(params.provider_id, date);
+    if (scheduleBlocks && scheduleBlocks.length > 0) {
+      slots = [];
+      for (const block of scheduleBlocks) {
+        if (!block.pc_startTime || !block.pc_endTime) continue;
+        const [sh, sm] = block.pc_startTime.slice(0, 5).split(':').map(Number);
+        const [eh, em] = block.pc_endTime.slice(0, 5).split(':').map(Number);
+        const blockFacilityId = block.pc_facility ? Number(block.pc_facility) : facilityId;
+        slots.push(...generateSlotsInWindow(sh * 60 + sm, eh * 60 + em, slotDurMins, bookedTimes, date, blockFacilityId, providerId, cat));
+      }
+      slotSource = 'calendar';
+    } else if (scheduleApi === 'rest') {
+      return providerError('health_check_slots', `No REST schedule blocks found for provider ${params.provider_id} on ${date}`, startMs);
+    }
+  }
+
+  // ── Algorithmic fallback: 08:00–17:00 ────────────────────────────────────
+  if (slotSource === 'algorithmic' && scheduleApi !== 'fhir' && scheduleApi !== 'rest') {
+    slots = generateSlotsInWindow(8 * 60, 17 * 60, slotDurMins, bookedTimes, date, facilityId, providerId, cat);
+  }
+
+  return success('health_check_slots', {
+    provider: 'openemr',
+    date,
+    available_slots: slots,
+    count: slots.length,
+    earliest_available_date: slots.length > 0 ? date : null,
+    slot_source: slotSource,
+    schedule_api: scheduleApi,
+  }, startMs);
 }
 
 export async function holdSlot(params: z.infer<typeof holdSlotSchema>, startMs: number): Promise<CanonicalResponse> {

@@ -25,6 +25,8 @@ use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\RestControllers\Config\RestConfig;
 use OpenEMR\RestControllers\FHIR\FhirAllergyIntoleranceRestController;
 use OpenEMR\RestControllers\FHIR\FhirAppointmentRestController;
+use OpenEMR\RestControllers\FHIR\FhirScheduleRestController;
+use OpenEMR\RestControllers\FHIR\FhirSlotRestController;
 use OpenEMR\RestControllers\FHIR\FhirCarePlanRestController;
 use OpenEMR\RestControllers\FHIR\FhirCareTeamRestController;
 use OpenEMR\RestControllers\FHIR\FhirCoverageRestController;
@@ -90,6 +92,30 @@ return [
             RestConfig::request_authorization_check($request, "patients", "med");
             $return = (new FhirAllergyIntoleranceRestController($request))->getOne($uuid);
         }
+
+        return $return;
+    },
+    "GET /fhir/Schedule" => function (HttpRestRequest $request) {
+        RestConfig::request_authorization_check($request, "patients", "appt");
+        $return = (new FhirScheduleRestController($request))->getAll($request->getQueryParams());
+
+        return $return;
+    },
+    "GET /fhir/Schedule/:uuid" => function ($uuid, HttpRestRequest $request) {
+        RestConfig::request_authorization_check($request, "patients", "appt");
+        $return = (new FhirScheduleRestController($request))->getOne($uuid);
+
+        return $return;
+    },
+    "GET /fhir/Slot" => function (HttpRestRequest $request) {
+        RestConfig::request_authorization_check($request, "patients", "appt");
+        $return = (new FhirSlotRestController($request))->getAll($request->getQueryParams());
+
+        return $return;
+    },
+    "GET /fhir/Slot/:uuid" => function ($uuid, HttpRestRequest $request) {
+        RestConfig::request_authorization_check($request, "patients", "appt");
+        $return = (new FhirSlotRestController($request))->getOne($uuid);
 
         return $return;
     },

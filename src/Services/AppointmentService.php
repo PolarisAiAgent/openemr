@@ -255,6 +255,52 @@ class AppointmentService extends BaseService
         return $finalRecords;
     }
 
+    /**
+     * Returns schedule blocks (pc_pid = 0) for a given provider, optionally
+     * filtered by date range.  These rows represent provider availability windows
+     * entered through the OpenEMR calendar rather than patient appointments.
+     *
+     * @param int    $providerId  OpenEMR user/provider ID (pc_aid)
+     * @param string $dateStart   YYYY-MM-DD inclusive lower bound (optional)
+     * @param string $dateEnd     YYYY-MM-DD inclusive upper bound (optional)
+     * @return array              Array of raw database rows
+     */
+    public function getProviderScheduleBlocks(int $providerId, string $dateStart = '', string $dateEnd = ''): array
+    {
+        $sql = "SELECT pce.pc_eid,
+                       pce.uuid AS pc_uuid,
+                       pce.pc_aid,
+                       pce.pc_eventDate,
+                       pce.pc_startTime,
+                       pce.pc_endTime,
+                       pce.pc_duration,
+                       pce.pc_catid,
+                       pce.pc_title,
+                       pce.pc_facility,
+                       pce.pc_allday,
+                       pce.pc_recurrtype,
+                       f1.name AS facility_name
+                FROM openemr_postcalendar_events AS pce
+                LEFT JOIN facility AS f1 ON pce.pc_facility = f1.id
+                WHERE pce.pc_pid = 0
+                  AND pce.pc_aid = ?";
+
+        $sqlBindArray = [$providerId];
+
+        if (!empty($dateStart)) {
+            $sql .= " AND pce.pc_eventDate >= ?";
+            $sqlBindArray[] = $dateStart;
+        }
+        if (!empty($dateEnd)) {
+            $sql .= " AND pce.pc_eventDate <= ?";
+            $sqlBindArray[] = $dateEnd;
+        }
+
+        $sql .= " ORDER BY pce.pc_eventDate, pce.pc_startTime";
+
+        return QueryUtils::fetchRecords($sql, $sqlBindArray);
+    }
+
     public function getAppointment($eid)
     {
         $sql = "SELECT pce.pc_eid,
