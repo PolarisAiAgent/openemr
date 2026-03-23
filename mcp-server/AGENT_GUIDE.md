@@ -6,6 +6,7 @@ A practical reference for developers building AI agents that consume the OpenEMR
 
 ## Table of Contents
 
+- [OpenEMR OAuth2 Setup](#openemr-oauth2-setup)
 - [Core Concepts](#core-concepts)
   - [Response Envelope](#response-envelope)
   - [Error Codes](#error-codes)
@@ -30,6 +31,85 @@ A practical reference for developers building AI agents that consume the OpenEMR
 - [PHI Masking Rules](#phi-masking-rules)
 - [Persistence-Dependent Tools](#persistence-dependent-tools)
 - [Design Notes for Agent Authors](#design-notes-for-agent-authors)
+
+---
+
+## OpenEMR OAuth2 Setup
+
+Before the MCP server can call OpenEMR APIs, you must register an OAuth2 client and configure the credentials.
+
+### 1. Register a confidential OAuth2 client
+
+Run this once against your OpenEMR instance. The `application_type: "private"` field is required — it is the only way OpenEMR recognises a confidential client and allows `user/*` scopes.
+
+```bash
+curl -X POST http://localhost/oauth2/default/registration \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "client_name": "openemr-mcp",
+    "application_type": "private",
+    "redirect_uris": ["https://localhost/callback"],
+    "grant_types": ["password", "authorization_code"],
+    "scope": "openid api:oemr user/Patient.read user/Appointment.read user/Appointment.write"
+  }'
+```
+
+**Notes:**
+- `redirect_uris` is required by the spec but never used — the MCP server uses the Password Grant, not the Authorization Code flow. Any valid URI works.
+- `user/Facility.read` is **not** a valid scope in OpenEMR; omit it.
+- OpenEMR **generates** and returns the `client_secret` — do not supply your own.
+
+**Example response:**
+
+```json
+{
+  "client_id": "AbCdEfGhIjKlMnOpQrStUv",
+  "client_secret": "generated-secret-value",
+  "client_name": "openemr-mcp",
+  ...
+}
+```
+
+### 2. Configure the MCP server
+
+Copy the `client_id` and `client_secret` from the registration response into `docker/production/.env`:
+
+```env
+OPENEMR_CLIENT_ID=AbCdEfGhIjKlMnOpQrStUv
+OPENEMR_CLIENT_SECRET=generated-secret-value
+```
+
+### 3. Set the correct base URL
+
+In `docker/production/docker-compose.yml`, the MCP server connects to OpenEMR using the Docker service name. Use plain HTTP to avoid self-signed certificate errors:
+
+```yaml
+OPENEMR_BASE_URL: http://openemr
+```
+
+If you must use HTTPS (e.g. your OpenEMR has a valid cert), uncomment:
+
+```yaml
+# NODE_TLS_REJECT_UNAUTHORIZED: "0"
+```
+
+only when using a private/self-signed cert within a trusted Docker network.
+
+### 4. Restart the MCP container
+
+```bash
+docker compose restart openemr-mcp
+```
+
+### Re-registration
+
+Each fresh OpenEMR install has no pre-registered clients. If you see:
+
+```json
+{ "error": "invalid_client", "error_description": "Client authentication failed" }
+```
+
+the stored credentials don't match this OpenEMR instance — re-run step 1 and update `.env`.
 
 ---
 

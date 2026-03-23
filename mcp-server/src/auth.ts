@@ -58,7 +58,8 @@ export async function getAccessToken(): Promise<string> {
     client_secret: config.clientSecret,
     username: config.username,
     password: config.password,
-    scope: 'openid api:oemr user/Patient.read user/Appointment.read user/Appointment.write',
+    user_role: 'users',
+    scope: 'openid offline_access api:oemr api:fhir user/patient.crus user/facility.crus user/appointment.cruds user/encounter.crus user/practitioner.crus user/user.rs user/list.r user/Appointment.read user/Appointment.write user/Patient.read user/Patient.write user/ValueSet.read',
   });
 
   const response = await fetch(tokenUrl, {

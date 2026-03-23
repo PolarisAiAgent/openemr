@@ -4,13 +4,14 @@
 #   if not provided, then default to openemr, openemr, admin, and pass respectively.
 #
 # MCP server (openemr-mcp):
-#   Exposes the 22 canonical health_* tools over HTTP on port 3100.
-#   Required secrets are passed via environment variables (or a .env file).
-#   Set OPENEMR_CLIENT_ID/SECRET after registering an OAuth2 client in OpenEMR:
-#     curl -X POST https://<host>/oauth2/default/registration \
-#       -H 'Content-Type: application/json' \
-#       -d '{"client_name":"openemr-mcp","redirect_uris":["https://client.example.com/cb"],
-#            "scope":"openid api:oemr user/Patient.read user/Appointment.read user/Appointment.write"}'
+#   Exposes the 24 canonical health_* tools over HTTP on port 3100.
+#   Required secrets are passed via environment variables (from .env file).
+#
+#   Register an OAuth2 client before starting (see .env and TESTING_CLINIC_SETUP.md §0):
+#     UI:  https://<host>/interface/smart/register-app.php
+#          Type: Confidential | Context: Multipurpose Application
+#          Check all user/* scopes + openid, api:oemr, api:fhir, offline_access
+#     Then enable the client and enable Password Grant in Admin → Config → Connectors.
 services:
   mysql:
     restart: always
@@ -83,16 +84,16 @@ services:
       NODE_ENV: production
 
       # ── OpenEMR connection ────────────────────────────────────────────────
-      # The MCP server connects to OpenEMR's internal hostname over HTTPS.
-      # Self-signed certs are common in production OpenEMR; set NODE_TLS_REJECT_UNAUTHORIZED=0
-      # only when using a private/self-signed cert within a trusted Docker network.
-      OPENEMR_BASE_URL: https://openemr
+      # HTTP is used within the Docker network to avoid self-signed cert issues.
+      # Switch to https://openemr and uncomment NODE_TLS_REJECT_UNAUTHORIZED
+      # only if OpenEMR is configured with a valid or trusted TLS certificate.
+      OPENEMR_BASE_URL: http://openemr
       OPENEMR_SITE: default
       OPENEMR_USERNAME: ${OPENEMR_MCP_USER:-admin}
       OPENEMR_PASSWORD: ${OPENEMR_MCP_PASS:-pass}
       OPENEMR_CLIENT_ID: ${OPENEMR_CLIENT_ID}
       OPENEMR_CLIENT_SECRET: ${OPENEMR_CLIENT_SECRET}
-      # Uncomment only if OpenEMR uses a private/self-signed TLS cert:
+      # Uncomment only if using HTTPS with a private/self-signed TLS cert:
       # NODE_TLS_REJECT_UNAUTHORIZED: "0"
 
       # ── Optional clinic config ────────────────────────────────────────────

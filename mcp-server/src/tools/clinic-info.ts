@@ -7,7 +7,7 @@
  *
  * OpenEMR REST surface:
  *   GET /api/facility               — location data
- *   GET /api/list/appttype          — appointment/procedure types
+ *   GET /fhir/ValueSet              — appointment/procedure types (appointment-type ValueSet)
  *
  * Office hours and billing policy are config-driven (from environment variables
  * OFFICE_HOURS_JSON and BILLING_POLICY_JSON). If not configured, reasonable
@@ -57,12 +57,9 @@ interface FacilityRecord {
   [key: string]: unknown;
 }
 
-interface CategoryRecord {
-  pc_catid?: string | number;
-  pc_catname?: string;
-  pc_catdesc?: string;
-  pc_duration?: string | number;
-  pc_catcolor?: string;
+interface FhirConcept {
+  code?: string;
+  display?: string;
   [key: string]: unknown;
 }
 
@@ -218,32 +215,39 @@ export async function getProcedureCatalog(
 ): Promise<CanonicalResponse> {
   const limit = params.limit && params.limit > 0 ? params.limit : 20;
 
-  const raw = await openemr.get<unknown>('/api/list/appttype');
-  let categories = extractList<CategoryRecord>(raw);
+  // Appointment categories are not in list_options; they live in
+  // openemr_postcalendar_categories, exposed only via FHIR ValueSet.
+  const raw = await openemr.get<unknown>('/fhir/ValueSet');
+
+  // Extract the appointment-type ValueSet entry from the FHIR Bundle
+  let concepts: FhirConcept[] = [];
+  if (raw && typeof raw === 'object') {
+    const bundle = raw as { entry?: Array<{ resource?: { id?: string; compose?: { include?: Array<{ concept?: FhirConcept[] }> } } }> };
+    const apptEntry = bundle.entry?.find((e) => e.resource?.id === 'appointment-type');
+    concepts = apptEntry?.resource?.compose?.include?.[0]?.concept ?? [];
+  }
 
   if (params.procedure_code) {
-    categories = categories.filter(
-      (c) => String(c.pc_catid ?? '') === params.procedure_code,
-    );
+    concepts = concepts.filter((c) => c.code === params.procedure_code);
   }
 
   if (params.query) {
     const q = params.query.toLowerCase();
-    categories = categories.filter(
+    concepts = concepts.filter(
       (c) =>
-        (c.pc_catname ?? '').toLowerCase().includes(q) ||
-        (c.pc_catdesc ?? '').toLowerCase().includes(q),
+        (c.code ?? '').toLowerCase().includes(q) ||
+        (c.display ?? '').toLowerCase().includes(q),
     );
   }
 
-  categories = categories.slice(0, limit);
+  concepts = concepts.slice(0, limit);
 
-  const catalog = categories.map((c) => ({
-    procedure_code: String(c.pc_catid ?? ''),
-    name: c.pc_catname ?? null,
-    description: c.pc_catdesc ?? null,
-    duration_minutes: c.pc_duration ? Math.floor(Number(c.pc_duration) / 60) : null,
-    color: c.pc_catcolor ?? null,
+  const catalog = concepts.map((c) => ({
+    procedure_code: c.code ?? null,
+    name: c.display ?? null,
+    description: null,
+    duration_minutes: null,
+    color: null,
   }));
 
   return success('health_get_procedure_catalog', {

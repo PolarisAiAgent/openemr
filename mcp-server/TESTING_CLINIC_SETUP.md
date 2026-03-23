@@ -12,6 +12,7 @@ This tutorial walks a tester through creating a minimal but complete clinic in O
 
 ## Table of Contents
 
+0. [Register and Enable the OAuth2 Client](#0-register-and-enable-the-oauth2-client)
 1. [Enable the REST API](#1-enable-the-rest-api)
 2. [Create a Facility (Clinic Location)](#2-create-a-facility-clinic-location)
 3. [Create Appointment Categories (Visit Types)](#3-create-appointment-categories-visit-types)
@@ -32,6 +33,75 @@ This tutorial walks a tester through creating a minimal but complete clinic in O
 
 ---
 
+## 0. Register and Enable the OAuth2 Client
+
+Do this once per OpenEMR instance before any other steps.
+
+### 0.1 Register the client
+
+```bash
+curl -s -X POST http://localhost/oauth2/default/registration \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "client_name": "openemr-mcp",
+    "application_type": "private",
+    "redirect_uris": ["https://localhost/callback"],
+    "grant_types": ["password", "authorization_code"],
+    "scope": "openid api:oemr user/Patient.read user/Appointment.read user/Appointment.write"
+  }'
+```
+
+Copy `client_id` and `client_secret` from the response into `docker/production/.env`:
+
+```env
+OPENEMR_CLIENT_ID=<client_id from response>
+OPENEMR_CLIENT_SECRET=<client_secret from response>
+```
+
+Then restart the MCP container:
+
+```bash
+docker compose restart openemr-mcp
+```
+
+### 0.2 Enable the client in the admin UI
+
+Clients with `user/*` scopes are created **disabled** and require manual approval.
+
+1. Log in as `admin`.
+2. Navigate to `https://localhost/interface/smart/register-app.php`
+3. Find `openemr-mcp` in the list — it will show as disabled.
+4. Click **Enable**.
+
+### 0.3 Enable the Password Grant
+
+OpenEMR disables the Password Grant by default.
+
+1. Navigate to **Administration → Config → Connectors**.
+2. Search for `password`.
+3. Enable **"Enable OAuth2 Password Grant (Not SMART on FHIR Compliant)"**.
+4. Click **Save**.
+
+### 0.4 Verify — obtain a token
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost/oauth2/default/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=password' \
+  -d 'client_id=YOUR_CLIENT_ID' \
+  -d 'client_secret=YOUR_CLIENT_SECRET' \
+  -d 'username=admin' \
+  -d 'password=pass' \
+  -d 'user_role=users' \
+  -d 'scope=openid api:oemr user/Patient.read user/Appointment.read user/Appointment.write' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+echo $TOKEN
+```
+
+`user_role=users` is required for admin/provider accounts (`user_role=patient` for patient portal accounts).
+
+---
+
 ## 1. Enable the REST API
 
 > Skip if already done. The MCP server will return auth errors for all tool calls if the API is disabled.
@@ -49,7 +119,30 @@ This tutorial walks a tester through creating a minimal but complete clinic in O
 
 5. Click **Save**.
 
-**Verify:** `curl -sk https://localhost/apis/default/api/facility -H "Authorization: Bearer <token>"` should return JSON (not an auth error).
+**Verify:**
+
+First, obtain a token (replace `YOUR_CLIENT_ID` and `YOUR_CLIENT_SECRET` with the values from `docker/production/.env`):
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost/oauth2/default/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=password' \
+  -d 'client_id=YOUR_CLIENT_ID' \
+  -d 'client_secret=YOUR_CLIENT_SECRET' \
+  -d 'username=admin' \
+  -d 'password=pass' \
+  -d 'user_role=users' \
+  -d 'scope=openid api:oemr user/Patient.read user/Appointment.read user/Appointment.write' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+
+Then call the API:
+
+```bash
+curl -sk https://localhost/apis/default/api/facility -H "Authorization: Bearer $TOKEN"
+```
+
+Should return JSON (not an auth error).
 
 ---
 
@@ -57,7 +150,7 @@ This tutorial walks a tester through creating a minimal but complete clinic in O
 
 The facility record is what `health_get_location` and `health_check_slots` return as the clinic location.
 
-1. Navigate to **Administration → Practice → Facilities**.
+1. Navigate to **Administration → Clinic → Facilities**.
 2. Click **Add Facility**.
 3. Fill in:
 
@@ -96,37 +189,44 @@ Expected: `locations` array contains `Sunridge Family Clinic` with address field
 
 Appointment categories define visit types and slot durations. `health_get_procedure_catalog` and `health_check_slots` rely on these.
 
-1. Navigate to **Administration → Practice → Appointment Categories**.
-2. Create **three** categories by clicking **Add** for each:
+1. Navigate to **Admin → Clinic → Calendar**.
+2. Scroll to the **bottom** of the page to the blank **Add** form (do **not** edit the existing system categories like "No Show").
+3. Fill in the fields and click **Save** for each new category:
 
-### Category 1 — Office Visit
+### Category — Office Visit
 
 | Field | Value |
 |-------|-------|
-| **Category Name** | `Office Visit` |
-| **Duration** | `30` minutes |
-| **Color** | `#4CAF50` (green) |
+| **Name** | `Office Visit` |
+| **Identifier** | `office_visit` |
+| **Duration Hours** | `0`, **Minutes** `30` |
+| **Color** | click **[pick]** and choose a green |
 | **Description** | `General outpatient office visit` |
+| **Active** | Yes |
 
-### Category 2 — New Patient Consultation
+### Category — New Patient Consultation
 
 | Field | Value |
 |-------|-------|
-| **Category Name** | `New Patient Consultation` |
-| **Duration** | `60` minutes |
-| **Color** | `#2196F3` (blue) |
+| **Name** | `New Patient Consultation` |
+| **Identifier** | `new_patient` |
+| **Duration Hours** | `1`, **Minutes** `0` |
+| **Color** | click **[pick]** and choose a blue |
 | **Description** | `Initial consultation for new patients` |
+| **Active** | Yes |
 
-### Category 3 — Follow-Up
+### Category — Follow-Up
 
 | Field | Value |
 |-------|-------|
-| **Category Name** | `Follow-Up` |
-| **Duration** | `15` minutes |
-| **Color** | `#FF9800` (orange) |
+| **Name** | `Follow-Up` |
+| **Identifier** | `follow_up` |
+| **Duration Hours** | `0`, **Minutes** `15` |
+| **Color** | click **[pick]** and choose an orange |
 | **Description** | `Follow-up appointment` |
+| **Active** | Yes |
 
-3. Save each.
+4. Click **Save** after filling in each category.
 
 **MCP verify:**
 ```bash
